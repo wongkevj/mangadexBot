@@ -2,11 +2,14 @@ import discord
 from discord.ext import commands
 import feedparser
 import configparser
+import aiohttp
 import os
 import time
 import json
 import threading
 import datetime
+import lxml.html
+from sys import exit
 
 
 #credential parsing from credentials.ini
@@ -144,8 +147,28 @@ async def unsubscribe(ctx, mangaId: int):
 
 @bot.command(pass_context=True)
 async def shutdown(ctx):
-    if ctx.message.author.id == owner:
-        await bot.logout()
+    await bot.logout()
+    exit()
+
+@bot.command(pass_context=True)
+async def info(ctx, mangaId: int):
+    async with aiohttp.ClientSession() as session:
+        async with session.get('https://mangadex.org/manga/' + str(mangaId)) as resp:
+            if resp.status == 200:
+                tree = lxml.html.fromstring(await resp.text())
+                mangaTitle = tree.xpath('//h3[@class="panel-title"]/text()')[0]
+                mangaDesc = tree.xpath('//meta[@property="og:description"]/@content')[0]
+                #mangaThumb = tree.xpath('//meta[@property="og:image"]/@content')[0]
+                sendEmbed = discord.Embed(title=mangaTitle,
+                                          url='https://mangadex.org/manga/' + str(mangaId), 
+                                          description=mangaDesc)
+                sendEmbed.set_image(url='https://mangadex.org/images/manga/' + str(mangaId) + '.jpg')
+                await ctx.message.channel.send(embed=sendEmbed)
+            else:
+                await ctx.message.channel.send("Unable to fetch info at this time")
+                print("Bad request!")
+    
+
 
 #utility commands to write changes to disk
 #TODO - consolidate into single generic function?
@@ -203,6 +226,17 @@ def checkFeeds():
 #sends a message in every channel with subscriptions, and pings everyone who's subscribed
 async def notifySubs(mangaId: int, chList: dict, entries: list):
     
+    #scrape info about the manga
+    mangaTitle = ""
+    async with aiohttp.ClientSession() as session:
+        async with session.get('https://mangadex.org/manga/' + mangaId) as resp:
+            if resp.status == 200:
+                tree = lxml.html.fromstring(await resp.text())
+                mangaTitle = tree.xpath('//h3[@class="panel-title"]/text()')[0]
+                #mangaThumb = tree.xpath('//meta[@property="og:image"]/@content')[0]
+            else:
+                print("Bad request!")
+
     #main loop, aka channel loop
     for channel, users in chList.items():
 
@@ -220,15 +254,16 @@ async def notifySubs(mangaId: int, chList: dict, entries: list):
             descriptionString += '[' + entry.title + '](' + entry.link + ')\n'
 
         #fancy lil' embed for masked links
-        sendEmbed = discord.Embed(title='New Chapters',
+        sendEmbed = discord.Embed(title='New Chapters for ' + mangaTitle,
                                   description=descriptionString)
+        sendEmbed.set_thumbnail(url='https://mangadex.org/images/manga/' + str(mangaId) + '.thumb.jpg')
         await channelObj.send(content=memberPings, embed=sendEmbed)
 
     return
 
 @bot.command()
 async def invite_link(ctx):
-    ctx.send('https://discordapp.com/oauth2/authorize?client_id=473271749027561473&scope=bot')
+    await ctx.message.channel.send('https://discordapp.com/oauth2/authorize?client_id=473271749027561473&scope=bot')
 
 
 """
