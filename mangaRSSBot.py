@@ -9,6 +9,7 @@ import json
 import threading
 import datetime
 import lxml.html
+import asyncio
 from sys import exit
 
 
@@ -208,9 +209,9 @@ def checkFeeds():
             #if there are new entries, add them to the DB and notify the subscribers
             if len(newEntries) > 0:
                 for entry in newEntries:
-                    mangaDB[manga].append(entry)
+                    mangaDB[manga].append(entry.title)
                 write_db_changes()
-                bot.loop.run_until_complete(notifySubs(manga, channels, newEntries))
+                newLoop = asyncio.ensure_future(notifySubs(manga, channels, newEntries), loop=bot.loop)
                 updatesFound = True
 
             time.sleep(2) #throttle requests to not burden their servers too much
@@ -227,16 +228,37 @@ def checkFeeds():
 async def notifySubs(mangaId: int, chList: dict, entries: list):
     
     #scrape info about the manga
-    mangaTitle = ""
     async with aiohttp.ClientSession() as session:
         async with session.get('https://mangadex.org/manga/' + mangaId) as resp:
+            mangaTitle = ""
             if resp.status == 200:
                 tree = lxml.html.fromstring(await resp.text())
                 mangaTitle = tree.xpath('//h3[@class="panel-title"]/text()')[0]
                 #mangaThumb = tree.xpath('//meta[@property="og:image"]/@content')[0]
+                for channel, users in chList.items():
+                    channelObj = bot.get_channel(int(channel))
+                    guild = channelObj.guild
+                    memberPings = ""
+                    descriptionString = ""
+
+                    #add mentions for all subscribers
+                    for user in users:
+                        memberPings += " " + guild.get_member(int(user)).mention
+                    #add links to all the new chapters found
+                    for entry in entries:
+                        descriptionString += '[' + entry.title + '](' + entry.link + ')\n'
+                    #fancy lil' embed for masked links
+                    sendEmbed = discord.Embed(title='New Chapters for ' + mangaTitle,
+                                              description=descriptionString)
+                    sendEmbed.set_thumbnail(url='https://mangadex.org/images/manga/' + str(mangaId) + '.thumb.jpg')
+                    await channelObj.send(content=memberPings, embed=sendEmbed)
+
+
             else:
                 print("Bad request!")
 
+            #main loop, aka channel loop
+    """
     #main loop, aka channel loop
     for channel, users in chList.items():
 
@@ -252,14 +274,16 @@ async def notifySubs(mangaId: int, chList: dict, entries: list):
         #add links to all the new chapters found
         for entry in entries:
             descriptionString += '[' + entry.title + '](' + entry.link + ')\n'
-
+        print(descriptionString)
+        print(channelObj.id)
         #fancy lil' embed for masked links
         sendEmbed = discord.Embed(title='New Chapters for ' + mangaTitle,
                                   description=descriptionString)
         sendEmbed.set_thumbnail(url='https://mangadex.org/images/manga/' + str(mangaId) + '.thumb.jpg')
         await channelObj.send(content=memberPings, embed=sendEmbed)
+    """
 
-    return
+    #return
 
 @bot.command()
 async def invite_link(ctx):
