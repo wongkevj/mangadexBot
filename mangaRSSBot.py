@@ -190,11 +190,12 @@ async def unsubscribe(ctx, mangaId: int):
 
 @bot.command(pass_context=True)
 async def shutdown(ctx):
-    await bot.logout()
-    pendingTasks = asyncio.Task.all_tasks()
-    for task in pendingTasks:
-        task.cancel()
-    exit()
+    if str(ctx.message.author.id) == str(owner):
+        await bot.logout()
+        pendingTasks = asyncio.Task.all_tasks()
+        for task in pendingTasks:
+            task.cancel()
+        exit()
 
 @bot.command(pass_context=True)
 async def info(ctx, mangaId: int):
