@@ -34,7 +34,7 @@ mangaDB (dict):
 The data structure containing the known chapters
 of every series subscribed to 
     keys - mangaIds (int)
-    vals - titles (list of strings)
+    vals - chapter ids (list of ints)
 """
 mangaDB = {}
 
@@ -61,11 +61,20 @@ if os.path.isfile('data/mangaDB.json'):
 description = 'A bot that allows users to subscribe to updates to manga from mangadex.org'
 bot = commands.Bot(command_prefix='$', description=description)
 
+#startup function
 @bot.event
 async def on_ready():
     print('Connected!')
-    update_thread = threading.Thread(target=checkFeeds)
-    update_thread.start()
+    asyncio.ensure_future(checkFeeds())
+
+#check whether a manga exists
+async def valid(mangaId: int):
+    #testing async with
+    pageJson = {}
+    async with aiohttp.ClientSession() as session:
+        async with session.get('https://mangadex.org/api/manga/' + str(mangaId)) as resp:
+            pageJson = await resp.json()
+    return pageJson['status'] == 'OK'
 
 #Adds user to a subscription list
 @bot.command(pass_context=True)
@@ -73,14 +82,20 @@ async def subscribe(ctx, mangaId: int):
     """Adds user to the subscription list for the manga specified by ID"""
 
     #check if allowed to send messages in this channel
+    print("in subscribe!")
     if not ctx.message.channel.permissions_for(ctx.message.guild.me).send_messages:
         return
 
     if not mangaId in mangaList:
 
         #check if id is valid
-        response = feedparser.parse('https://mangadex.org/rss/manga_id/' + str(mangaId))
-        if len(response.entries) == 0:
+        pageJson = {}
+        async with aiohttp.ClientSession() as session:
+            async with session.get('https://mangadex.org/api/manga/' + str(mangaId)) as resp:
+                pageJson = await resp.json()
+
+        if pageJson.get('status') != 'OK':
+            print("manga not found")
             await ctx.message.channel.send("Manga does not exist.")
             return
 
@@ -91,11 +106,17 @@ async def subscribe(ctx, mangaId: int):
             mangaList[mangaId][ctx.message.channel.id].append(ctx.message.author.id)
             
             #create db of known chapters for the manga
-            mangaDB[mangaId] = []
+            mangaDB[mangaId] = {}
+            mangaDB[mangaId]['title'] = pageJson['manga']['title']
+            mangaDB[mangaId]['chapters'] = []
+            englishChaps = [chapterId for chapterId in pageJson['chapter'].keys() if pageJson['chapter'][chapterId]['lang_code'] == 'gb']
+            mangaDB[mangaId]['chapters'].extend(englishChaps)
+            write_db_changes()
+            """
             for filteredEntry in (rawEntries for rawEntries in response.entries if "Language: English" in rawEntries.description):
-                mangaDB[mangaId].append(filteredEntry.title)
+                mangaDB[mangaId].d(filteredEntry.title)
                 write_db_changes()
-
+            """
     else:
         #if the channel doesn't exist, create it
         if not ctx.message.channel.id in mangaList[mangaId]:
@@ -114,8 +135,29 @@ async def subscribe(ctx, mangaId: int):
 
     #save changes to disk
     write_sub_changes()
-    await ctx.message.channel.send('Successfully subscribed!')
+    await ctx.message.channel.send('Successfully subscribed to ' + pageJson['manga']['title'] + '!')
     return
+
+@bot.command(pass_context=True)
+async def subscriptions(ctx):
+    authorId = ctx.message.author.id
+    subs = []
+    for manga, channels in mangaList.items():
+        for channel, users in channels.items():
+            if authorId in users:
+                subs.append(manga)
+    if subs:
+        titleString = 'Current Subscriptions for ' + ctx.message.author.display_name 
+        descString = ''
+        for sub in subs:
+            descString += '[' + str(sub) + ': ' + mangaDB[sub]['title'] + ']' + '(https://mangadex.org/manga/' + str(sub) + ')\n'
+        descString += '\nFor more info about these series, use `$info [ID of the manga]`!'
+        sendEmbed = discord.Embed(title=titleString, description=descString)
+        sendEmbed.set_thumbnail(url=ctx.message.author.avatar_url)
+    await ctx.message.channel.send(embed=sendEmbed)
+        
+
+        
 
 #Removes user from a subscription list
 @bot.command(pass_context=True)
@@ -149,21 +191,24 @@ async def unsubscribe(ctx, mangaId: int):
 @bot.command(pass_context=True)
 async def shutdown(ctx):
     await bot.logout()
+    pendingTasks = asyncio.Task.all_tasks()
+    for task in pendingTasks:
+        task.cancel()
     exit()
 
 @bot.command(pass_context=True)
 async def info(ctx, mangaId: int):
     async with aiohttp.ClientSession() as session:
-        async with session.get('https://mangadex.org/manga/' + str(mangaId)) as resp:
+        async with session.get('https://mangadex.org/api/manga/' + str(mangaId)) as resp:
             if resp.status == 200:
-                tree = lxml.html.fromstring(await resp.text())
-                mangaTitle = tree.xpath('//h3[@class="panel-title"]/text()')[0]
-                mangaDesc = tree.xpath('//meta[@property="og:description"]/@content')[0]
-                #mangaThumb = tree.xpath('//meta[@property="og:image"]/@content')[0]
+                jsonResp = (await resp.json())
+                mangaTitle = jsonResp['manga']['title']
+                mangaDesc = jsonResp['manga']['description']
+                mangaImg = 'https://mangadex.org' + jsonResp['manga']['cover_url']
                 sendEmbed = discord.Embed(title=mangaTitle,
                                           url='https://mangadex.org/manga/' + str(mangaId), 
                                           description=mangaDesc)
-                sendEmbed.set_image(url='https://mangadex.org/images/manga/' + str(mangaId) + '.jpg')
+                sendEmbed.set_image(url=mangaImg)
                 await ctx.message.channel.send(embed=sendEmbed)
             else:
                 await ctx.message.channel.send("Unable to fetch info at this time")
@@ -185,103 +230,75 @@ def write_db_changes():
 
 
 #infinite loop which checks the RSS feeds and calls notifySubs when new updates have been found
-def checkFeeds():
+async def checkFeeds():
     while True:
 
         print('[' + str(datetime.datetime.now()) + '] - Checking feeds...')
 
+
         updatesFound = False 
         for manga, channels in mangaList.items():
-            response = feedparser.parse('https://mangadex.org/rss/manga_id/' + str(manga))
             
-            #check if it went through successfully, else skip it
-            if response.status != 200:
-                continue
+            async with aiohttp.ClientSession() as session:
 
-            
-            newEntries = []
-            #iterate through all the english entries
-            for filteredEntry in (rawEntries for rawEntries in response.entries if "Language: English" in rawEntries.description):
-                #if the title isn't in the DB, it's new
-                if not filteredEntry.title in mangaDB[manga]:
-                    newEntries.append(filteredEntry)
+                async with session.get('https://mangadex.org/api/manga/' + str(manga)) as resp:
 
-            #if there are new entries, add them to the DB and notify the subscribers
-            if len(newEntries) > 0:
-                for entry in newEntries:
-                    mangaDB[manga].append(entry.title)
-                write_db_changes()
-                newLoop = asyncio.ensure_future(notifySubs(manga, channels, newEntries), loop=bot.loop)
-                updatesFound = True
+                    if resp.status == 200:
+                        pageJson = await resp.json()
+                        englishChaps = [chapterId for chapterId in pageJson['chapter'].keys() if pageJson['chapter'][chapterId]['lang_code'] == 'gb']
 
-            time.sleep(2) #throttle requests to not burden their servers too much
+                        #transition to new data format
+                        if type(mangaDB[manga]) == list:
+                            tempList = mangaDB[manga]
+                            mangaDB[manga] = {}
+                            mangaDB[manga]['title'] = pageJson['manga']['title']
+                            mangaDB[manga]['chapters'] = tempList
+                            write_db_changes()
+
+
+                        newEntries = set(englishChaps) - set(mangaDB[manga]['chapters'])
+
+                        if len(newEntries) > 0:
+                            mangaDB[manga]['chapters'].extend(newEntries)
+                            write_db_changes()
+                            await notifySubs(manga, channels, newEntries, pageJson)
+                            updatesFound = True
+
+            await asyncio.sleep(2) #throttle requests to not burden their servers too much
 
         if not updatesFound:
             print("[" + str(datetime.datetime.now()) + "] - Feeds checked, no updates found!")
         else:
             print("[" + str(datetime.datetime.now()) + "] - Feeds checked, updates found!")
 
-        time.sleep(1800) #fetch updates every half hour
+        await asyncio.sleep(1800) #fetch updates every half hour
 
    
 #sends a message in every channel with subscriptions, and pings everyone who's subscribed
-async def notifySubs(mangaId: int, chList: dict, entries: list):
-    
-    #scrape info about the manga
-    async with aiohttp.ClientSession() as session:
-        async with session.get('https://mangadex.org/manga/' + mangaId) as resp:
-            mangaTitle = ""
-            if resp.status == 200:
-                tree = lxml.html.fromstring(await resp.text())
-                mangaTitle = tree.xpath('//h3[@class="panel-title"]/text()')[0]
-                #mangaThumb = tree.xpath('//meta[@property="og:image"]/@content')[0]
-                for channel, users in chList.items():
-                    channelObj = bot.get_channel(int(channel))
-                    guild = channelObj.guild
-                    memberPings = ""
-                    descriptionString = ""
+async def notifySubs(mangaId: int, chList: dict, entries: list, chapters):
 
-                    #add mentions for all subscribers
-                    for user in users:
-                        memberPings += " " + guild.get_member(int(user)).mention
-                    #add links to all the new chapters found
-                    for entry in entries:
-                        descriptionString += '[' + entry.title + '](' + entry.link + ')\n'
-                    #fancy lil' embed for masked links
-                    sendEmbed = discord.Embed(title='New Chapters for ' + mangaTitle,
-                                              description=descriptionString)
-                    sendEmbed.set_thumbnail(url='https://mangadex.org/images/manga/' + str(mangaId) + '.thumb.jpg')
-                    await channelObj.send(content=memberPings, embed=sendEmbed)
+    #manga info
+    mangaTitle = chapters['manga']['title']
+    mangaDesc = chapters['manga']['description']
+    mangaImg = 'https://mangadex.org' + chapters['manga']['cover_url']
 
-
-            else:
-                print("Bad request!")
-
-            #main loop, aka channel loop
-    """
-    #main loop, aka channel loop
     for channel, users in chList.items():
-
-        channelObj = bot.get_channel(channel)
+        channelObj = bot.get_channel(int(channel))
         guild = channelObj.guild
         memberPings = ""
         descriptionString = ""
 
         #add mentions for all subscribers
         for user in users:
-            memberPings += " " + guild.get_member(user).mention
-        
+            memberPings += " " + guild.get_member(int(user)).mention
         #add links to all the new chapters found
         for entry in entries:
-            descriptionString += '[' + entry.title + '](' + entry.link + ')\n'
-        print(descriptionString)
-        print(channelObj.id)
+            descriptionString += '[Chapter ' + chapters['chapter'][entry]['chapter'] + ' - ' + chapters['chapter'][entry]['title'] + '](https://mangadex.org/chapter/' + str(entry) + ')\n'
         #fancy lil' embed for masked links
         sendEmbed = discord.Embed(title='New Chapters for ' + mangaTitle,
                                   description=descriptionString)
-        sendEmbed.set_thumbnail(url='https://mangadex.org/images/manga/' + str(mangaId) + '.thumb.jpg')
+        sendEmbed.set_thumbnail(url=mangaImg)
         await channelObj.send(content=memberPings, embed=sendEmbed)
-    """
 
     #return
 
