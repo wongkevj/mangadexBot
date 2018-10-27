@@ -1,6 +1,5 @@
 import discord
 from discord.ext import commands
-import feedparser
 import configparser
 import aiohttp
 import os
@@ -8,7 +7,6 @@ import time
 import json
 import threading
 import datetime
-import lxml.html
 import asyncio
 from sys import exit
 
@@ -18,6 +16,7 @@ parser = configparser.ConfigParser()
 parser.read('credentials.ini')
 token = parser['Login']['Token']
 owner = parser['Owner']['ID']
+subLock = asyncio.Lock()
 
 """
 mangaList (dict):
@@ -101,10 +100,13 @@ async def subscribe(ctx, mangaId: int):
 
         else:
             #create sub list for the manga and add user to it
+            if subLock.locked():
+                await ctx.message.channel.send("Subscribing, this may take a moment...")
+            await subLock.acquire()
             mangaList[mangaId] = {}
             mangaList[mangaId][ctx.message.channel.id] = []
             mangaList[mangaId][ctx.message.channel.id].append(ctx.message.author.id)
-            
+            subLock.release() 
             #create db of known chapters for the manga
             mangaDB[mangaId] = {}
             mangaDB[mangaId]['title'] = pageJson['manga']['title']
@@ -120,8 +122,10 @@ async def subscribe(ctx, mangaId: int):
     else:
         #if the channel doesn't exist, create it
         if not ctx.message.channel.id in mangaList[mangaId]:
+            await subLock.acquire()
             mangaList[mangaId][ctx.message.channel.id] = []
             mangaList[mangaId][ctx.message.channel.id].append(ctx.message.author.id)
+            subLock.release()
 
         else:
             #check if user is already subscribed
@@ -176,6 +180,7 @@ async def unsubscribe(ctx, mangaId: int):
         return
 
     #remove them from the list
+    await subLock.acquire()
     mangaList[mangaId][ctx.message.channel.id].remove(ctx.message.author.id)
     if not mangaList[mangaId][ctx.message.channel.id]:
         #if there's no one left on the channel's list, remove it
@@ -183,7 +188,7 @@ async def unsubscribe(ctx, mangaId: int):
         if not mangaList[mangaId]:
             #if there are no more channels, remove the manga from the list
             mangaList.pop(mangaId)
-
+    subLock.release()
     write_sub_changes()
     await ctx.message.channel.send("Successfully unsubscribed!")
     return
@@ -233,7 +238,7 @@ def write_db_changes():
 #infinite loop which checks the RSS feeds and calls notifySubs when new updates have been found
 async def checkFeeds():
     while True:
-
+        await subLock.acquire()
         print('[' + str(datetime.datetime.now()) + '] - Checking feeds...')
 
 
@@ -245,6 +250,7 @@ async def checkFeeds():
                 async with session.get('https://mangadex.org/api/manga/' + str(manga)) as resp:
 
                     if resp.status == 200:
+                        print("request processed!")
                         pageJson = await resp.json()
                         englishChaps = [chapterId for chapterId in pageJson['chapter'].keys() if pageJson['chapter'][chapterId]['lang_code'] == 'gb']
 
@@ -265,13 +271,13 @@ async def checkFeeds():
                             await notifySubs(manga, channels, newEntries, pageJson)
                             updatesFound = True
 
-            await asyncio.sleep(2) #throttle requests to not burden their servers too much
-
+            await asyncio.sleep(1) #throttle requests to not burden their servers too much
+        print("Finished processing!")
+        subLock.release()
         if not updatesFound:
             print("[" + str(datetime.datetime.now()) + "] - Feeds checked, no updates found!")
         else:
             print("[" + str(datetime.datetime.now()) + "] - Feeds checked, updates found!")
-
         await asyncio.sleep(1800) #fetch updates every half hour
 
    
