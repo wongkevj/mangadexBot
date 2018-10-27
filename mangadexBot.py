@@ -250,7 +250,6 @@ async def checkFeeds():
                 async with session.get('https://mangadex.org/api/manga/' + str(manga)) as resp:
 
                     if resp.status == 200:
-                        print("request processed!")
                         pageJson = await resp.json()
                         englishChaps = [chapterId for chapterId in pageJson['chapter'].keys() if pageJson['chapter'][chapterId]['lang_code'] == 'gb']
 
@@ -272,7 +271,6 @@ async def checkFeeds():
                             updatesFound = True
 
             await asyncio.sleep(1) #throttle requests to not burden their servers too much
-        print("Finished processing!")
         subLock.release()
         if not updatesFound:
             print("[" + str(datetime.datetime.now()) + "] - Feeds checked, no updates found!")
